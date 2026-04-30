@@ -82,6 +82,10 @@ function formatMoney(value: string) {
   }).format(numeric);
 }
 
+function normalizePdfText(value: string) {
+  return value.normalize("NFC").replace(/\s+/g, " ").trim();
+}
+
 function extractRucFromFilename(fileName: string) {
   const match = fileName.match(/\b(\d{11})\b/);
   return match?.[1] ?? "";
@@ -279,7 +283,7 @@ export default function Home() {
     ) => {
       pdf.setFont("helvetica", opts.bold ? "bold" : "normal");
       pdf.setFontSize(size);
-      pdf.text(text, x, y, {
+      pdf.text(normalizePdfText(text), x, y, {
         align: opts.align ?? "left",
         maxWidth: contentWidth,
       });
@@ -333,9 +337,9 @@ export default function Home() {
     infoRows.forEach(([label, value]) => {
       pdf.setFontSize(6.5);
       pdf.setTextColor(107, 114, 128);
-      pdf.text(label, marginX, y);
+      pdf.text(normalizePdfText(label), marginX, y);
       pdf.setTextColor(17, 24, 39);
-      const wrapped = pdf.splitTextToSize(String(value), contentWidth / 2);
+      const wrapped = pdf.splitTextToSize(normalizePdfText(String(value)), contentWidth / 2);
       pdf.text(wrapped, pageWidth - marginX, y, {
         align: "right",
         maxWidth: contentWidth / 2,
@@ -347,14 +351,16 @@ export default function Home() {
 
     pdf.setTextColor(17, 24, 39);
     ticket.items.forEach((item) => {
-      const descriptionLines = pdf.splitTextToSize(item.description, contentWidth - 24);
-      const itemHeight = Math.max(14, descriptionLines.length * 3.5 + 7);
+      const description = normalizePdfText(item.description);
+      const descriptionLines = pdf.splitTextToSize(description, contentWidth - 34);
+      const itemHeight = Math.max(18, descriptionLines.length * 3.5 + 9);
       pdf.roundedRect(marginX, y - 0.4, contentWidth, itemHeight, 2, 2, "S");
-      pdf.setFontSize(6.5);
+      pdf.setFontSize(6.1);
       pdf.setFont("helvetica", "bold");
       pdf.text(descriptionLines, marginX + 3, y + 4);
+      pdf.setFontSize(7);
       pdf.text(
-        `S/ ${formatMoney(item.total)}`,
+        normalizePdfText(`S/ ${formatMoney(item.total)}`),
         pageWidth - marginX - 3,
         y + 4,
         { align: "right" },
@@ -363,7 +369,9 @@ export default function Home() {
       pdf.setFontSize(5.8);
       pdf.setTextColor(107, 114, 128);
       pdf.text(
-        `Cant. ${item.quantity} · Unit. S/ ${formatMoney(item.unitPrice)}`,
+        normalizePdfText(
+          `Cant. ${item.quantity} · Unit. S/ ${formatMoney(item.unitPrice)}`,
+        ),
         marginX + 3,
         y + itemHeight - 3,
       );
