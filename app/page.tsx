@@ -17,10 +17,11 @@ import { Textarea } from "@/components/ui/textarea";
 
 type LineItem = {
   id: string;
+  code: string;
   description: string;
   quantity: string;
+  unit: string;
   unitPrice: string;
-  total: string;
 };
 
 type ParsedTicket = {
@@ -33,9 +34,12 @@ type ParsedTicket = {
   customerDocument: string;
   customerDocumentType: string;
   currency: string;
+  salesSubtotal: string;
   subtotal: string;
   discount: string;
+  igv: string;
   total: string;
+  amountInWords: string;
   items: LineItem[];
 };
 
@@ -51,9 +55,12 @@ const fallbackTicket: ParsedTicket = {
   customerDocument: "Sin documento",
   customerDocumentType: "—",
   currency: "PEN",
+  salesSubtotal: "0.00",
   subtotal: "0.00",
   discount: "0.00",
+  igv: "0.00",
   total: "0.00",
+  amountInWords: "",
   items: [],
 };
 
@@ -74,12 +81,30 @@ function cleanValue(value: string) {
 }
 
 function formatMoney(value: string) {
-  const numeric = Number.parseFloat(value.replace(/,/g, ""));
-  if (Number.isNaN(numeric)) return value || "0.00";
-  return new Intl.NumberFormat("es-PE", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(numeric);
+  const match = value.match(/^(-?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return value || "0.00";
+  const [, sign, integer, fraction] = match;
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${sign}${grouped}${fraction === undefined ? "" : `.${fraction}`}`;
+}
+
+function addDecimalAmounts(first: string, second: string) {
+  const parse = (value: string) => value.match(/^(-?)(\d+)(?:\.(\d+))?$/);
+  const left = parse(first);
+  const right = parse(second);
+  if (!left || !right) return first;
+
+  const precision = Math.max(left[3]?.length ?? 0, right[3]?.length ?? 0);
+  const asInteger = (parts: RegExpMatchArray) =>
+    BigInt(`${parts[1]}${parts[2]}${(parts[3] ?? "").padEnd(precision, "0")}`);
+  const sum = asInteger(left) + asInteger(right);
+  const negative = sum < BigInt(0) ? "-" : "";
+  const digits = (sum < BigInt(0) ? -sum : sum)
+    .toString()
+    .padStart(precision + 1, "0");
+  return precision === 0
+    ? `${negative}${digits}`
+    : `${negative}${digits.slice(0, -precision)}.${digits.slice(-precision)}`;
 }
 
 function normalizePdfText(value: string) {
@@ -140,6 +165,25 @@ function parseXmlToTicket(xmlText: string, fileName = ""): ParsedTicket {
       "cac\\:LegalMonetaryTotal cbc\\:PayableAmount",
       "LegalMonetaryTotal PayableAmount",
     ]) || "0.00";
+  const igvSubtotals = Array.from(
+    doc.documentElement.querySelectorAll(
+      ":scope > cac\\:TaxTotal > cac\\:TaxSubtotal, :scope > TaxTotal > TaxSubtotal",
+    ),
+  ).filter((tax) =>
+    textAt(tax, ["cac\\:TaxScheme cbc\\:ID", "TaxScheme ID"]) === "1000",
+  );
+  const igv = igvSubtotals.reduce(
+    (sum, tax) =>
+      addDecimalAmounts(
+        sum,
+        textAt(tax, ["cbc\\:TaxAmount", "TaxAmount"]) || "0.00",
+      ),
+    "0.00",
+  );
+  const amountInWords = textAt(doc, [
+    'cbc\\:Note[languageLocaleID="1000"]',
+    'Note[languageLocaleID="1000"]',
+  ]).replace(/^SON:\s*/i, "").replace(/\s+/g, " ");
 
   const lines = Array.from(
     doc.querySelectorAll("cac\\:InvoiceLine, InvoiceLine"),
@@ -149,23 +193,26 @@ function parseXmlToTicket(xmlText: string, fileName = ""): ParsedTicket {
       `Ítem ${index + 1}`;
     const quantity =
       textAt(line, ["cbc\\:InvoicedQuantity", "InvoicedQuantity"]) || "1.00";
+    const unitCode =
+      line
+        .querySelector("cbc\\:InvoicedQuantity, InvoicedQuantity")
+        ?.getAttribute("unitCode") || "—";
     const unitPrice =
       textAt(line, [
         "cac\\:Price cbc\\:PriceAmount",
         "Price PriceAmount",
-        "cac\\:PricingReference cbc\\:PriceAmount",
-        "PricingReference PriceAmount",
-      ]) || "0.00";
-    const totalAmount =
-      textAt(line, ["cbc\\:LineExtensionAmount", "LineExtensionAmount"]) ||
-      unitPrice;
+      ]) || "—";
 
     return {
       id: textAt(line, ["cbc\\:ID", "ID"]) || String(index + 1),
+      code: textAt(line, [
+        "cac\\:SellersItemIdentification cbc\\:ID",
+        "SellersItemIdentification ID",
+      ]) || "—",
       description,
       quantity,
+      unit: unitCode === "NIU" ? "UNIDAD" : unitCode,
       unitPrice,
-      total: totalAmount,
     };
   });
 
@@ -183,9 +230,12 @@ function parseXmlToTicket(xmlText: string, fileName = ""): ParsedTicket {
       ? customerDocumentType || "DNI/RUC"
       : "Sin documento",
     currency,
+    salesSubtotal: addDecimalAmounts(subtotal, discount),
     subtotal,
     discount,
+    igv,
     total,
+    amountInWords,
     items: lines,
   };
 }
@@ -353,16 +403,20 @@ export default function Home() {
     ticket.items.forEach((item) => {
       const description = normalizePdfText(item.description);
       const descriptionLines = pdf.splitTextToSize(description, contentWidth - 34);
-      const itemHeight = Math.max(18, descriptionLines.length * 3.5 + 9);
+      const itemHeight = Math.max(20, descriptionLines.length * 3.5 + 12);
       pdf.roundedRect(marginX, y - 0.4, contentWidth, itemHeight, 2, 2, "S");
       pdf.setFontSize(6.1);
       pdf.setFont("helvetica", "bold");
       pdf.text(descriptionLines, marginX + 3, y + 4);
+      pdf.setFontSize(5.5);
+      pdf.text("Valor unitario", pageWidth - marginX - 3, y + 4, {
+        align: "right",
+      });
       pdf.setFontSize(7);
       pdf.text(
-        normalizePdfText(`S/ ${formatMoney(item.total)}`),
+        normalizePdfText(`S/ ${formatMoney(item.unitPrice)}`),
         pageWidth - marginX - 3,
-        y + 4,
+        y + 8,
         { align: "right" },
       );
       pdf.setFont("helvetica", "normal");
@@ -370,7 +424,7 @@ export default function Home() {
       pdf.setTextColor(107, 114, 128);
       pdf.text(
         normalizePdfText(
-          `Cant. ${item.quantity} · Unit. S/ ${formatMoney(item.unitPrice)}`,
+          `Cant. ${item.quantity} · ${item.unit} · Cód. ${item.code}`,
         ),
         marginX + 3,
         y + itemHeight - 3,
@@ -388,25 +442,41 @@ export default function Home() {
 
     addLine(2, 5);
 
+    const totals = [
+      ["Sub Total Ventas", ticket.salesSubtotal],
+      ["Descuentos", ticket.discount],
+      ["Valor Venta", ticket.subtotal],
+      ["IGV", ticket.igv],
+    ] as const;
     pdf.setFontSize(6.5);
     pdf.setTextColor(107, 114, 128);
-    pdf.text("Subtotal", marginX, y);
-    pdf.text(`S/ ${formatMoney(ticket.subtotal)}`, pageWidth - marginX, y, {
-      align: "right",
+    totals.forEach(([label, value]) => {
+      pdf.text(label, marginX, y);
+      pdf.text(`S/ ${formatMoney(value)}`, pageWidth - marginX, y, {
+        align: "right",
+      });
+      y += 4.5;
     });
-    y += 4.5;
-    pdf.text("Descuento", marginX, y);
-    pdf.text(`S/ ${formatMoney(ticket.discount)}`, pageWidth - marginX, y, {
-      align: "right",
-    });
-    y += 5;
     pdf.setFont("helvetica", "bold");
     pdf.setTextColor(17, 24, 39);
     pdf.setFontSize(8);
-    pdf.text("Total", marginX, y);
+    pdf.text("Importe Total", marginX, y);
     pdf.text(`S/ ${formatMoney(ticket.total)}`, pageWidth - marginX, y, {
       align: "right",
     });
+    if (ticket.amountInWords) {
+      y += 6;
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(6);
+      pdf.text(
+        pdf.splitTextToSize(
+          normalizePdfText(`SON: ${ticket.amountInWords}`),
+          contentWidth,
+        ),
+        marginX,
+        y,
+      );
+    }
 
     pdf.save(`${clientFirstName || "cliente"}-comprobante.pdf`);
   }
@@ -672,17 +742,17 @@ export default function Home() {
                       <div
                         key={item.id}
                         className="rounded-2xl bg-zinc-50 p-3 text-sm dark:bg-zinc-100"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <p className="font-medium">{item.description}</p>
-                          <p className="shrink-0 font-semibold">
-                            S/ {formatMoney(item.total)}
-                          </p>
-                        </div>
-                        <p className="mt-1 text-xs text-zinc-500">
-                          Cant. {item.quantity} · Unit. S/{" "}
-                          {formatMoney(item.unitPrice)}
-                        </p>
+                       >
+                         <div className="flex items-start justify-between gap-3">
+                           <p className="font-medium">{item.description}</p>
+                           <div className="shrink-0 text-right">
+                             <p className="text-xs text-zinc-500">Valor unitario</p>
+                             <p className="font-semibold">S/ {formatMoney(item.unitPrice)}</p>
+                           </div>
+                         </div>
+                         <p className="mt-1 text-xs text-zinc-500">
+                           Cant. {item.quantity} · {item.unit} · Cód. {item.code}
+                         </p>
                       </div>
                     ))
                   ) : (
@@ -696,18 +766,31 @@ export default function Home() {
 
                 <div className="grid gap-2 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-zinc-500">Subtotal</span>
+                    <span className="text-zinc-500">Sub Total Ventas</span>
+                    <span>S/ {formatMoney(ticket.salesSubtotal)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-zinc-500">Descuentos</span>
+                    <span>S/ {formatMoney(ticket.discount)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-zinc-500">Valor Venta</span>
                     <span>S/ {formatMoney(ticket.subtotal)}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-zinc-500">Descuento</span>
-                    <span>S/ {formatMoney(ticket.discount)}</span>
+                    <span className="text-zinc-500">IGV</span>
+                    <span>S/ {formatMoney(ticket.igv)}</span>
                   </div>
                   <div className="flex justify-between text-base font-semibold">
-                    <span>Total</span>
+                    <span>Importe Total</span>
                     <span>S/ {formatMoney(ticket.total)}</span>
                   </div>
                 </div>
+                {ticket.amountInWords ? (
+                  <p className="mt-4 text-xs text-zinc-500">
+                    SON: {ticket.amountInWords}
+                  </p>
+                ) : null}
               </div>
               <p className="mt-4 text-xs text-zinc-500 dark:text-zinc-400">
                 Privacidad: el XML se procesa localmente y no se envía a
